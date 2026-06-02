@@ -311,6 +311,12 @@ function makeEl(tag, css) {
   return e;
 }
 
+const DPAD_LABELS = { 12: 'D-Up', 13: 'D-Down', 14: 'D-Left', 15: 'D-Right' };
+
+function buttonLabel(index) {
+  return index !== undefined ? (DPAD_LABELS[index] ?? `Button ${index}`) : 'Unassigned';
+}
+
 function buildRow(storageKey, mappings) {
   const assignedIndex = mappings[storageKey];
 
@@ -337,7 +343,7 @@ function buildRow(storageKey, mappings) {
     'min-width:120px',
     'text-align:center',
   ].join(';'));
-  chip.textContent = assignedIndex !== undefined ? `Button ${assignedIndex}` : 'Unassigned';
+  chip.textContent = buttonLabel(assignedIndex);
 
   chip.addEventListener('mouseenter', () => {
     if (listeningForKey !== storageKey) chip.style.background = 'rgba(255,255,255,0.15)';
@@ -376,7 +382,7 @@ function setChipListening(chip) {
 
 function resetChip(chip, mappings, storageKey) {
   const idx = mappings[storageKey];
-  chip.textContent         = idx !== undefined ? `Button ${idx}` : 'Unassigned';
+  chip.textContent         = buttonLabel(idx);
   chip.style.background    = 'rgba(255,255,255,0.08)';
   chip.style.borderColor   = 'rgba(255,255,255,0.15)';
   chip.style.color         = idx !== undefined ? '#fff' : '#666';
