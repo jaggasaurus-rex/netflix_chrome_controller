@@ -1,64 +1,147 @@
 // Netflix Controller — maps Xbox gamepad input to keyboard events
 
-const DEADZONE = 0.2;
-const AXIS_REPEAT_DELAY = 400;    // ms before a held stick direction starts repeating
-const AXIS_REPEAT_INTERVAL = 150; // ms between repeats once repeating starts
+const DEADZONE          = 0.2;
+const AXIS_REPEAT_DELAY    = 400;  // ms before a held stick direction starts repeating
+const AXIS_REPEAT_INTERVAL = 150;  // ms between repeats once repeating starts
+const MOUSE_SPEED       = 10;      // px per frame at full stick deflection
+const MOUSE_DPAD_STEP   = 10;      // px per d-pad press in mouse mode
 
-// Standard Xbox controller button indices (W3C standard mapping)
-// 0:A  1:B  2:X  3:Y  4:LB  5:RB  6:LT  7:RT  8:Back  9:Start
-// 10:L3  11:R3  12:DUp  13:DDown  14:DLeft  15:DRight  16:Home
-const BUTTON_MAP = {
-  0:  'Enter',       // A       — select / confirm
-  1:  'Escape',      // B       — back
-  2:  ' ',           // X       — play/pause
-  3:  'f',           // Y       — toggle fullscreen
-  4:  'ArrowLeft',   // LB      — rewind 10s
-  5:  'ArrowRight',  // RB      — fast forward 10s
-  8:  'Escape',      // Back    — back
-  9:  ' ',           // Start   — play/pause
-  12: 'ArrowUp',     // D-Up    — navigate up
-  13: 'ArrowDown',   // D-Down  — navigate down
-  14: 'ArrowLeft',   // D-Left  — navigate left
-  15: 'ArrowRight',  // D-Right — navigate right
+// Non-remappable button aliases — always hardcoded
+// 4:LB → rewind, 5:RB → fast forward, 8:Back → back, 9:Start → play/pause
+const FIXED_BUTTON_MAP = {
+  4: 'ArrowLeft',
+  5: 'ArrowRight',
+  8: 'Escape',
+  9: ' ',
+};
+
+// Storage key name (lowercase) → KeyboardEvent key value
+const STORAGE_KEY_TO_EVENT_KEY = {
+  enter:      'Enter',
+  escape:     'Escape',
+  space:      ' ',
+  f:          'f',
+  backspace:  'Backspace',
+  w:          'w',
+  a:          'a',
+  s:          's',
+  d:          'd',
+  arrowup:    'ArrowUp',
+  arrowdown:  'ArrowDown',
+  arrowleft:  'ArrowLeft',
+  arrowright: 'ArrowRight',
 };
 
 const KEY_TO_CODE = {
-  ' ':           'Space',
-  'Enter':       'Enter',
-  'Escape':      'Escape',
-  'f':           'KeyF',
-  'm':           'KeyM',
-  'ArrowUp':     'ArrowUp',
-  'ArrowDown':   'ArrowDown',
-  'ArrowLeft':   'ArrowLeft',
-  'ArrowRight':  'ArrowRight',
+  ' ':          'Space',
+  'Enter':      'Enter',
+  'Escape':     'Escape',
+  'Backspace':  'Backspace',
+  'f':          'KeyF',
+  'w':          'KeyW',
+  'a':          'KeyA',
+  's':          'KeyS',
+  'd':          'KeyD',
+  'ArrowUp':    'ArrowUp',
+  'ArrowDown':  'ArrowDown',
+  'ArrowLeft':  'ArrowLeft',
+  'ArrowRight': 'ArrowRight',
 };
 
-// Left stick axes: [axisIndex, direction, key]
+// Direction name → event key per joystick mode
+const DIR_KEYS = {
+  arrows: { left: 'ArrowLeft', right: 'ArrowRight', up: 'ArrowUp', down: 'ArrowDown' },
+  wasd:   { left: 'a',         right: 'd',          up: 'w',       down: 's'         },
+};
+
+// D-pad button index → direction name
+const DPAD_DIR = { 12: 'up', 13: 'down', 14: 'left', 15: 'right' };
+
+// Left stick: [axisIndex, dir (+1/-1), dirName]
 // Axis 0 = horizontal (left: -1, right: +1)
 // Axis 1 = vertical   (up:   -1, down:  +1)
-const STICK_DIRS = [
-  [0, -1, 'ArrowLeft'],
-  [0,  1, 'ArrowRight'],
-  [1, -1, 'ArrowUp'],
-  [1,  1, 'ArrowDown'],
+const STICK_AXES = [
+  [0, -1, 'left'],
+  [0,  1, 'right'],
+  [1, -1, 'up'],
+  [1,  1, 'down'],
 ];
+
+// ---------------------------------------------------------------------------
+// Runtime config — loaded from storage once, refreshed on overlay close
+// ---------------------------------------------------------------------------
+
+// Inverted mapping: buttonIndex → eventKey, built from stored remappable mappings
+let remappableButtonMap = {};
+let joystickMode = 'arrows';
+
+async function refreshConfig() {
+  const [mappings, mode] = await Promise.all([
+    window.NCCMappings.loadMappings(),
+    window.NCCMappings.loadJoystickMode(),
+  ]);
+
+  remappableButtonMap = {};
+  if (mappings) {
+    for (const [storageKey, btnIndex] of Object.entries(mappings)) {
+      const eventKey = STORAGE_KEY_TO_EVENT_KEY[storageKey];
+      if (eventKey !== undefined && btnIndex !== undefined) {
+        remappableButtonMap[btnIndex] = eventKey;
+      }
+    }
+  }
+
+  joystickMode = mode ?? 'arrows';
+}
+
+// ---------------------------------------------------------------------------
+// Input state
+// ---------------------------------------------------------------------------
 
 const prevButtonState = new Map(); // `${gpIndex}-${btnIndex}` → boolean
 const stickActive     = new Map(); // `${gpIndex}-${axis}-${dir}` → boolean
 const stickTimers     = new Map(); // same key → setTimeout handle
 
+let virtualMouseX = window.innerWidth  / 2;
+let virtualMouseY = window.innerHeight / 2;
+
 let pollingActive = false;
 
+// ---------------------------------------------------------------------------
+// Dispatch helpers
+// ---------------------------------------------------------------------------
+
 function fireKey(key, type) {
-  const event = new KeyboardEvent(type, {
+  document.dispatchEvent(new KeyboardEvent(type, {
     key,
     code: KEY_TO_CODE[key] ?? '',
     bubbles: true,
     cancelable: true,
-  });
-  document.dispatchEvent(event);
+  }));
 }
+
+function fireMouseMove(dx, dy) {
+  virtualMouseX = Math.max(0, Math.min(window.innerWidth,  virtualMouseX + dx));
+  virtualMouseY = Math.max(0, Math.min(window.innerHeight, virtualMouseY + dy));
+  document.dispatchEvent(new MouseEvent('mousemove', {
+    clientX:    virtualMouseX,
+    clientY:    virtualMouseY,
+    movementX:  dx,
+    movementY:  dy,
+    bubbles:    true,
+    cancelable: true,
+  }));
+}
+
+function applyMouseDir(dirName, pixels) {
+  const dx = dirName === 'left' ? -pixels : dirName === 'right' ? pixels : 0;
+  const dy = dirName === 'up'   ? -pixels : dirName === 'down'  ? pixels : 0;
+  fireMouseMove(dx, dy);
+}
+
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
 
 function scheduleRepeat(id, key) {
   stickTimers.set(id, setTimeout(() => {
@@ -74,11 +157,27 @@ function pollGamepads() {
 
     // --- Buttons ---
     gp.buttons.forEach((btn, i) => {
-      const key = BUTTON_MAP[i];
-      if (!key) return;
-
       const id = `${gp.index}-${i}`;
       const wasPressed = prevButtonState.get(id) ?? false;
+
+      // D-pad: unified direction system (shares output with left stick)
+      const dpadDir = DPAD_DIR[i];
+      if (dpadDir !== undefined) {
+        if (btn.pressed !== wasPressed) {
+          prevButtonState.set(id, btn.pressed);
+          if (joystickMode === 'mouse') {
+            if (btn.pressed) applyMouseDir(dpadDir, MOUSE_DPAD_STEP);
+          } else {
+            const key = DIR_KEYS[joystickMode]?.[dpadDir];
+            if (key) fireKey(key, btn.pressed ? 'keydown' : 'keyup');
+          }
+        }
+        return;
+      }
+
+      // Remappable face buttons (0–3 by default) + fixed buttons (4,5,8,9)
+      const key = remappableButtonMap[i] ?? FIXED_BUTTON_MAP[i];
+      if (!key) return;
 
       if (btn.pressed !== wasPressed) {
         fireKey(key, btn.pressed ? 'keydown' : 'keyup');
@@ -86,18 +185,30 @@ function pollGamepads() {
       }
     });
 
-    // --- Left analog stick with deadzone and auto-repeat ---
-    STICK_DIRS.forEach(([axis, dir, key]) => {
+    // --- Left analog stick (axes 0 & 1) ---
+    STICK_AXES.forEach(([axis, dir, dirName]) => {
       const id = `${gp.index}-${axis}-${dir}`;
       const raw = gp.axes[axis] ?? 0;
-      // Active when the stick exceeds the deadzone in the relevant direction
       const active = dir > 0 ? raw > DEADZONE : raw < -DEADZONE;
       const wasActive = stickActive.get(id) ?? false;
+
+      if (joystickMode === 'mouse') {
+        // Continuous per-frame movement proportional to deflection magnitude
+        if (active) applyMouseDir(dirName, Math.abs(raw) * MOUSE_SPEED);
+        // Clean up any key-mode state left over from a mode switch
+        if (wasActive) {
+          stickActive.set(id, false);
+          clearTimeout(stickTimers.get(id));
+        }
+        return;
+      }
+
+      const key = DIR_KEYS[joystickMode]?.[dirName];
+      if (!key) return;
 
       if (active && !wasActive) {
         stickActive.set(id, true);
         fireKey(key, 'keydown');
-        // Initial delay before repeat starts
         stickTimers.set(id, setTimeout(() => {
           if (stickActive.get(id)) {
             fireKey(key, 'keydown');
@@ -131,10 +242,10 @@ window.addEventListener('gamepaddisconnected', (e) => {
   console.log(`[Controller] Disconnected: ${e.gamepad.id}`);
 });
 
-// Pick up gamepads that connected before the content script loaded
-if ([...navigator.getGamepads()].some(Boolean)) {
-  startPolling();
-}
+// Load config first, then check for already-connected gamepads
+refreshConfig().then(() => {
+  if ([...navigator.getGamepads()].some(Boolean)) startPolling();
+});
 
 // ---------------------------------------------------------------------------
 // Overlay
@@ -199,6 +310,7 @@ function hideOverlay() {
   if (!overlay) return;
   overlay.remove();
   overlay = null;
+  refreshConfig();
 }
 
 function toggleOverlay() {
