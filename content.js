@@ -1,5 +1,7 @@
 // Netflix Controller — maps Xbox gamepad input to keyboard events
 
+const IS_TOP_FRAME = window === window.top;
+
 const DEADZONE          = 0.2;
 const AXIS_REPEAT_DELAY    = 400;  // ms before a held stick direction starts repeating
 const AXIS_REPEAT_INTERVAL = 150;  // ms between repeats once repeating starts
@@ -268,8 +270,10 @@ refreshConfig().then(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Overlay
+// Overlay — top frame only
 // ---------------------------------------------------------------------------
+
+if (IS_TOP_FRAME) {
 
 const KEY_LABELS = {
   enter:      'Enter',
@@ -596,16 +600,31 @@ function toggleOverlay() {
   overlay ? hideOverlay() : showOverlay();
 }
 
-// Backtick keyboard toggle — only active while the page is in fullscreen
-document.addEventListener('keydown', (e) => {
-  if (e.key === '`' && document.fullscreenElement !== null) toggleOverlay();
-});
+} // end IS_TOP_FRAME overlay block
 
-// Messages from background service worker
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.type === 'ping') {
-    sendResponse({ status: 'ready' });
-  } else if (msg.type === 'toggleOverlay') {
+// Backtick keyboard toggle — runs in all frames.
+// Top frame: toggle overlay. Child frames: bubble intent up to the top frame.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== '`' || document.fullscreenElement === null) return;
+  if (IS_TOP_FRAME) {
     toggleOverlay();
+  } else {
+    window.top.postMessage({ type: 'nccToggle' }, '*');
   }
 });
+
+if (IS_TOP_FRAME) {
+  // Messages from background service worker
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type === 'ping') {
+      sendResponse({ status: 'ready' });
+    } else if (msg.type === 'toggleOverlay') {
+      toggleOverlay();
+    }
+  });
+
+  // Relay nccToggle posted by the backtick handler in child frames
+  window.addEventListener('message', (e) => {
+    if (e.data?.type === 'nccToggle') toggleOverlay();
+  });
+}
