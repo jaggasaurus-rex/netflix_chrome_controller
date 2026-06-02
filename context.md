@@ -2,7 +2,7 @@
 
 ## What this is
 
-A Chrome extension (Manifest V3) that loads on Netflix pages and maps Xbox gamepad input to keyboard events, enabling controller navigation of the Netflix UI and player. Includes an in-page settings overlay for remapping buttons and choosing a joystick mode.
+A Chrome extension (Manifest V3) that injects into Netflix pages on demand and maps Xbox gamepad input to keyboard events, enabling controller navigation of the Netflix UI and player. Includes an in-page settings overlay for remapping buttons and choosing a joystick mode.
 
 ---
 
@@ -10,25 +10,32 @@ A Chrome extension (Manifest V3) that loads on Netflix pages and maps Xbox gamep
 
 ```
 manifest.json    — MV3 extension manifest
-background.js    — Service worker: forwards icon clicks to content script
-mappings.js      — Storage layer: button mappings + joystick mode (loads before content.js)
+background.js    — Service worker: on-demand injection + overlay toggle
+mappings.js      — Storage layer: button mappings + joystick mode
 content.js       — All runtime logic: polling loop, input dispatch, overlay UI
+context.md       — This file
 ```
 
 ---
 
 ## manifest.json
 
-- Permissions: `activeTab`, `storage`
+- Permissions: `activeTab`, `storage`, `scripting`
 - Background service worker: `background.js`
 - `"action": {}` with no `default_popup` — required for `chrome.action.onClicked` to fire
-- Content scripts match `*://*.netflix.com/*`, load order: `["mappings.js", "content.js"]`
+- **No `content_scripts` block** — scripts are injected on demand by the service worker, not on page load
 
 ---
 
 ## background.js
 
-Single responsibility: listens for `chrome.action.onClicked` (extension icon click) and sends `{ type: 'toggleOverlay' }` to the active tab's content script.
+Handles icon clicks with a ping-then-inject pattern:
+
+1. Send `{ type: 'ping' }` to the active tab and await a response
+2. **If ping succeeds** (content script already running): send `{ type: 'toggleOverlay' }`
+3. **If ping throws** (content script not yet injected): inject `mappings.js` first, then `content.js` (order matters — `content.js` depends on `window.NCCMappings`), then send `{ type: 'toggleOverlay' }`
+
+The `chrome.tabs.sendMessage` rejection is the injection-state signal — no extra bookkeeping needed.
 
 ---
 
@@ -52,17 +59,20 @@ Runs as an IIFE. Exposes everything on `window.NCCMappings` since content script
 
 **Exposed API on `window.NCCMappings`:**
 ```
-VALID_KEYS           — ordered array of valid key name strings
-VALID_JOYSTICK_MODES — ['wasd', 'arrows', 'mouse']
-loadMappings()       → Promise<object|null>
-saveMappings(obj)    → Promise<void>
+VALID_KEYS             — ordered array of valid key name strings
+VALID_JOYSTICK_MODES   — ['wasd', 'arrows', 'mouse']
+loadMappings()         → Promise<object|null>
+saveMappings(obj)      → Promise<void>
 assignButton(key, buttonIndex) → Promise<updatedMappings>
-clearButton(key)     → Promise<updatedMappings>
-loadJoystickMode()   → Promise<string|null>
+clearButton(key)       → Promise<updatedMappings>
+loadJoystickMode()     → Promise<string|null>
 saveJoystickMode(mode) → Promise<void>
+resetToDefaults()      → Promise<{ mappings, mode }>
 ```
 
 `loadMappings()` returns `null` (not `{}`) when storage has never been written, so callers can distinguish first-run from an empty assignment set.
+
+`resetToDefaults()` writes both storage keys atomically in a single `storage.set` call and returns the canonical default values so the caller never hardcodes them.
 
 ---
 
@@ -93,7 +103,7 @@ Default: A(0)→Enter, B(1)→Escape, X(2)→Space, Y(3)→F
 
 ### Polling loop
 
-Uses `requestAnimationFrame`. Starts once on `gamepadconnected` or on load if a gamepad is already connected. Never stops (overhead is negligible when no gamepad is present).
+Uses `requestAnimationFrame`. Starts once on `gamepadconnected` or on script load if a gamepad is already connected. Never stops (overhead is negligible when no gamepad is present).
 
 Config (`remappableButtonMap`, `joystickMode`) is loaded from storage once at startup via `refreshConfig()` and refreshed each time the overlay closes.
 
@@ -114,19 +124,29 @@ When the overlay is waiting for a button press (`listeningForKey !== null`):
 - The stick loop returns early.
 - `onButtonCaptured` calls `assignButton`, updates `overlayMappings`, rebuilds the grid DOM, and calls `refreshConfig()` to sync the polling loop.
 
+### Message listener
+
+Handles two message types from `background.js`:
+- `ping` — responds synchronously with `{ status: 'ready' }` so the service worker can detect the script is already running
+- `toggleOverlay` — calls `toggleOverlay()`
+
 ### Overlay
 
 Toggled by:
-1. Backtick (`` ` ``) keydown on `document`
-2. Extension icon click → `background.js` → `chrome.runtime.onMessage` → `toggleOverlay()`
+1. Backtick (`` ` ``) keydown — **only fires when `document.fullscreenElement !== null`** (i.e. Netflix is in fullscreen/player mode)
+2. Extension icon click → `background.js` ping/inject → `{ type: 'toggleOverlay' }` message
 
 `showOverlay()` is async: loads mappings + joystick mode from storage before building DOM (no empty-state flash). `overlayBuilding` flag prevents double-build on rapid double-click.
 
-**Grid:** one row per key in `VALID_KEYS` order. Each row shows the key label and a chip button displaying the assigned button index or "Unassigned". Clicking a chip enters listening mode for that key. Clicking a second chip cancels the first. Clicking the active chip cancels it.
+**Grid:** two-column CSS grid (`grid-auto-flow: column`, 7 rows per column), distributing the 13 keys with the first 7 in the left column and the last 6 in the right. Each row shows the key label and a chip button displaying the assigned button index or "Unassigned". Clicking a chip enters listening mode for that key. Clicking a second chip cancels the first. Clicking the active chip cancels it.
 
-**Joystick mode dropdown:** below the grid. Saves to storage immediately on change via `saveJoystickMode` + `refreshConfig`.
+**Joystick mode dropdown:** below the grid. Saves to storage immediately on change via `saveJoystickMode` + `refreshConfig`. The select element is stored in `overlayModeSelect` so the reset handler can update it without rebuilding the section.
 
-**On close:** cancels any in-progress listening, calls `refreshConfig()` to sync game input with any changes made in the session.
+**Reset to Default button:** below the joystick dropdown. Calls `resetToDefaults()` (defined in mappings.js — default values are not hardcoded in content.js), then updates `overlayMappings`, rebuilds the grid, and sets `overlayModeSelect.value` from the return value.
+
+**Footer:** centered link — "Buy me a coffee ☕" → `https://buymeacoffee.com/localization`, opens in new tab, styled low-contrast (`rgba(255,255,255,0.28)`).
+
+**On close:** cancels any in-progress listening, nulls `overlayModeSelect`, calls `refreshConfig()` to sync game input with any changes made in the session.
 
 ---
 
@@ -140,8 +160,9 @@ chrome.storage.local
        │
        ├── on load: initDefaults(), exposes API
        │
-       ▼
-  content.js
+       ▼                              icon click
+  content.js  ◄────────────────────  background.js
+       │                              (ping → inject if needed → toggleOverlay)
        │
        ├── startup: refreshConfig() → remappableButtonMap, joystickMode
        │
@@ -156,6 +177,7 @@ chrome.storage.local
              ├── open: load storage → build grid + dropdown
              ├── row click → listening → onButtonCaptured → assignButton → rebuild grid
              ├── dropdown change → saveJoystickMode → refreshConfig
+             ├── reset click → resetToDefaults → rebuild grid + sync dropdown
              └── close → refreshConfig
 ```
 
