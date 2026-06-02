@@ -107,6 +107,10 @@ let virtualMouseY = window.innerHeight / 2;
 
 let pollingActive = false;
 
+// Remapping capture state — read by pollGamepads to suppress game input
+let listeningForKey  = null; // storage key currently being remapped, or null
+let onButtonCaptured = null; // callback(btnIndex) set by overlay while listening
+
 // ---------------------------------------------------------------------------
 // Dispatch helpers
 // ---------------------------------------------------------------------------
@@ -160,6 +164,21 @@ function pollGamepads() {
       const id = `${gp.index}-${i}`;
       const wasPressed = prevButtonState.get(id) ?? false;
 
+      // While a row is listening, intercept the first new press as the
+      // assignment target and suppress all game input dispatch.
+      if (listeningForKey !== null) {
+        if (btn.pressed !== wasPressed) {
+          prevButtonState.set(id, btn.pressed);
+          if (btn.pressed && onButtonCaptured) {
+            const cb = onButtonCaptured;
+            onButtonCaptured = null;
+            listeningForKey = null;
+            cb(i);
+          }
+        }
+        return;
+      }
+
       // D-pad: unified direction system (shares output with left stick)
       const dpadDir = DPAD_DIR[i];
       if (dpadDir !== undefined) {
@@ -187,15 +206,16 @@ function pollGamepads() {
 
     // --- Left analog stick (axes 0 & 1) ---
     STICK_AXES.forEach(([axis, dir, dirName]) => {
+      // Suppress stick output while remapping
+      if (listeningForKey !== null) return;
+
       const id = `${gp.index}-${axis}-${dir}`;
       const raw = gp.axes[axis] ?? 0;
       const active = dir > 0 ? raw > DEADZONE : raw < -DEADZONE;
       const wasActive = stickActive.get(id) ?? false;
 
       if (joystickMode === 'mouse') {
-        // Continuous per-frame movement proportional to deflection magnitude
         if (active) applyMouseDir(dirName, Math.abs(raw) * MOUSE_SPEED);
-        // Clean up any key-mode state left over from a mode switch
         if (wasActive) {
           stickActive.set(id, false);
           clearTimeout(stickTimers.get(id));
@@ -251,65 +271,252 @@ refreshConfig().then(() => {
 // Overlay
 // ---------------------------------------------------------------------------
 
-let overlay = null;
+const KEY_LABELS = {
+  enter:      'Enter',
+  escape:     'Escape',
+  space:      'Space',
+  f:          'F',
+  backspace:  'Backspace',
+  w:          'W',
+  a:          'A',
+  s:          'S',
+  d:          'D',
+  arrowup:    'Arrow Up',
+  arrowdown:  'Arrow Down',
+  arrowleft:  'Arrow Left',
+  arrowright: 'Arrow Right',
+};
 
-function createOverlay() {
-  const panel = document.createElement('div');
-  panel.id = 'ncc-overlay';
-  panel.style.cssText = [
-    'position:fixed',
-    'top:50%',
-    'left:50%',
-    'transform:translate(-50%,-50%)',
-    'z-index:2147483647',
-    'background:#141414',
-    'color:#fff',
-    'border-radius:8px',
-    'padding:28px 32px 24px',
-    'min-width:320px',
-    'box-shadow:0 8px 40px rgba(0,0,0,0.85)',
-    'font-family:"Netflix Sans","Helvetica Neue",Helvetica,Arial,sans-serif',
-  ].join(';');
+const JOYSTICK_MODE_OPTIONS = [
+  { value: 'arrows', label: 'Arrow Keys'      },
+  { value: 'wasd',   label: 'WASD'            },
+  { value: 'mouse',  label: 'Mouse Movement'  },
+];
 
-  const title = document.createElement('h2');
-  title.textContent = 'Controller Settings';
-  title.style.cssText = 'margin:0;font-size:20px;font-weight:700;letter-spacing:0.01em';
+let overlay         = null;
+let overlayBuilding = false;
+let overlayGrid     = null;
+let overlayMappings = {};
 
-  const closeBtn = document.createElement('button');
-  closeBtn.textContent = '×';
-  closeBtn.setAttribute('aria-label', 'Close');
-  closeBtn.style.cssText = [
-    'position:absolute',
-    'top:10px',
-    'right:14px',
-    'background:none',
-    'border:none',
-    'color:#fff',
-    'font-size:22px',
-    'line-height:1',
-    'cursor:pointer',
-    'padding:4px 6px',
-    'opacity:0.7',
-  ].join(';');
-  closeBtn.addEventListener('mouseover', () => { closeBtn.style.opacity = '1'; });
-  closeBtn.addEventListener('mouseout',  () => { closeBtn.style.opacity = '0.7'; });
-  closeBtn.addEventListener('click', hideOverlay);
+// --- Row helpers ---
 
-  panel.appendChild(title);
-  panel.appendChild(closeBtn);
-  return panel;
+function makeEl(tag, css) {
+  const e = document.createElement(tag);
+  if (css) e.style.cssText = css;
+  return e;
 }
 
-function showOverlay() {
-  if (overlay) return;
-  overlay = createOverlay();
-  document.body.appendChild(overlay);
+function buildRow(storageKey, mappings) {
+  const assignedIndex = mappings[storageKey];
+
+  const row = makeEl('div', [
+    'display:flex',
+    'align-items:center',
+    'justify-content:space-between',
+    'padding:7px 0',
+    'border-bottom:1px solid rgba(255,255,255,0.07)',
+  ].join(';'));
+  row.dataset.key = storageKey;
+
+  const labelEl = makeEl('span', 'font-size:14px;color:#e5e5e5;flex:1');
+  labelEl.textContent = KEY_LABELS[storageKey];
+
+  const chip = makeEl('button', [
+    'background:rgba(255,255,255,0.08)',
+    'border:1px solid rgba(255,255,255,0.15)',
+    'border-radius:4px',
+    'color:' + (assignedIndex !== undefined ? '#fff' : '#666'),
+    'font-size:13px',
+    'padding:4px 10px',
+    'cursor:pointer',
+    'min-width:120px',
+    'text-align:center',
+  ].join(';'));
+  chip.textContent = assignedIndex !== undefined ? `Button ${assignedIndex}` : 'Unassigned';
+
+  chip.addEventListener('mouseenter', () => {
+    if (listeningForKey !== storageKey) chip.style.background = 'rgba(255,255,255,0.15)';
+  });
+  chip.addEventListener('mouseleave', () => {
+    if (listeningForKey !== storageKey) chip.style.background = 'rgba(255,255,255,0.08)';
+  });
+  chip.addEventListener('click', () => handleRowClick(storageKey, chip));
+
+  row.appendChild(labelEl);
+  row.appendChild(chip);
+  return row;
+}
+
+function buildGrid(mappings) {
+  const grid = makeEl('div', 'margin:16px 0 8px');
+  for (const key of window.NCCMappings.VALID_KEYS) {
+    grid.appendChild(buildRow(key, mappings));
+  }
+  return grid;
+}
+
+function setChipListening(chip) {
+  chip.textContent = 'Press a button…';
+  chip.style.background    = 'rgba(229,9,20,0.25)';
+  chip.style.borderColor   = 'rgba(229,9,20,0.7)';
+  chip.style.color         = '#fff';
+}
+
+function resetChip(chip, mappings, storageKey) {
+  const idx = mappings[storageKey];
+  chip.textContent         = idx !== undefined ? `Button ${idx}` : 'Unassigned';
+  chip.style.background    = 'rgba(255,255,255,0.08)';
+  chip.style.borderColor   = 'rgba(255,255,255,0.15)';
+  chip.style.color         = idx !== undefined ? '#fff' : '#666';
+}
+
+// --- Row click handler ---
+
+function handleRowClick(storageKey, chip) {
+  if (listeningForKey !== null) {
+    const prevKey  = listeningForKey;
+    const prevRow  = overlayGrid.querySelector(`[data-key="${prevKey}"]`);
+    const prevChip = prevRow?.querySelector('button');
+
+    listeningForKey  = null;
+    onButtonCaptured = null;
+    if (prevChip) resetChip(prevChip, overlayMappings, prevKey);
+
+    // Clicking the already-listening row just cancels it
+    if (prevKey === storageKey) return;
+  }
+
+  listeningForKey = storageKey;
+  setChipListening(chip);
+
+  const capturedKey = storageKey;
+  onButtonCaptured = async (btnIndex) => {
+    overlayMappings = await window.NCCMappings.assignButton(capturedKey, btnIndex);
+    const newGrid = buildGrid(overlayMappings);
+    overlayGrid.replaceWith(newGrid);
+    overlayGrid = newGrid;
+    await refreshConfig();
+  };
+}
+
+// --- Mode dropdown ---
+
+function buildModeSection(currentMode) {
+  const section = makeEl('div', [
+    'display:flex',
+    'align-items:center',
+    'justify-content:space-between',
+    'padding:12px 0 2px',
+    'border-top:1px solid rgba(255,255,255,0.1)',
+    'margin-top:4px',
+  ].join(';'));
+
+  const label = makeEl('span', 'font-size:14px;color:#e5e5e5');
+  label.textContent = 'Joystick Mode';
+
+  const select = makeEl('select', [
+    'background:#222',
+    'border:1px solid rgba(255,255,255,0.2)',
+    'border-radius:4px',
+    'color:#fff',
+    'font-size:13px',
+    'padding:4px 8px',
+    'cursor:pointer',
+    'min-width:140px',
+  ].join(';'));
+
+  for (const { value, label: text } of JOYSTICK_MODE_OPTIONS) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = text;
+    if (value === currentMode) opt.selected = true;
+    select.appendChild(opt);
+  }
+
+  select.addEventListener('change', async () => {
+    await window.NCCMappings.saveJoystickMode(select.value);
+    await refreshConfig();
+  });
+
+  section.appendChild(label);
+  section.appendChild(select);
+  return section;
+}
+
+// --- Show / hide / toggle ---
+
+async function showOverlay() {
+  if (overlay || overlayBuilding) return;
+  overlayBuilding = true;
+
+  try {
+    const [mappings, mode] = await Promise.all([
+      window.NCCMappings.loadMappings(),
+      window.NCCMappings.loadJoystickMode(),
+    ]);
+    overlayMappings = mappings ?? {};
+
+    const panel = makeEl('div', [
+      'position:fixed',
+      'top:50%',
+      'left:50%',
+      'transform:translate(-50%,-50%)',
+      'z-index:2147483647',
+      'background:#141414',
+      'color:#fff',
+      'border-radius:8px',
+      'padding:28px 32px 24px',
+      'min-width:400px',
+      'max-height:90vh',
+      'overflow-y:auto',
+      'box-shadow:0 8px 40px rgba(0,0,0,0.85)',
+      'font-family:"Netflix Sans","Helvetica Neue",Helvetica,Arial,sans-serif',
+    ].join(';'));
+    panel.id = 'ncc-overlay';
+
+    const title = makeEl('h2', 'margin:0;font-size:20px;font-weight:700;letter-spacing:0.01em');
+    title.textContent = 'Controller Settings';
+
+    const closeBtn = makeEl('button', [
+      'position:absolute',
+      'top:10px',
+      'right:14px',
+      'background:none',
+      'border:none',
+      'color:#fff',
+      'font-size:22px',
+      'line-height:1',
+      'cursor:pointer',
+      'padding:4px 6px',
+      'opacity:0.7',
+    ].join(';'));
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.addEventListener('mouseover', () => { closeBtn.style.opacity = '1'; });
+    closeBtn.addEventListener('mouseout',  () => { closeBtn.style.opacity = '0.7'; });
+    closeBtn.addEventListener('click', hideOverlay);
+
+    overlayGrid = buildGrid(overlayMappings);
+
+    panel.appendChild(title);
+    panel.appendChild(closeBtn);
+    panel.appendChild(overlayGrid);
+    panel.appendChild(buildModeSection(mode ?? 'arrows'));
+
+    overlay = panel;
+    document.body.appendChild(overlay);
+  } finally {
+    overlayBuilding = false;
+  }
 }
 
 function hideOverlay() {
   if (!overlay) return;
+  listeningForKey  = null;
+  onButtonCaptured = null;
   overlay.remove();
-  overlay = null;
+  overlay      = null;
+  overlayGrid  = null;
   refreshConfig();
 }
 
