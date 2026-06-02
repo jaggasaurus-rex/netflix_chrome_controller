@@ -297,6 +297,7 @@ let overlay         = null;
 let overlayBuilding = false;
 let overlayGrid     = null;
 let overlayMappings = {};
+let overlayModeSelect = null;
 
 // --- Row helpers ---
 
@@ -348,7 +349,14 @@ function buildRow(storageKey, mappings) {
 }
 
 function buildGrid(mappings) {
-  const grid = makeEl('div', 'margin:16px 0 8px');
+  const grid = makeEl('div', [
+    'display:grid',
+    'grid-template-columns:1fr 1fr',
+    'grid-auto-flow:column',
+    'grid-template-rows:repeat(7,auto)',
+    'column-gap:24px',
+    'margin:16px 0 8px',
+  ].join(';'));
   for (const key of window.NCCMappings.VALID_KEYS) {
     grid.appendChild(buildRow(key, mappings));
   }
@@ -438,8 +446,50 @@ function buildModeSection(currentMode) {
     await refreshConfig();
   });
 
+  overlayModeSelect = select;
+
   section.appendChild(label);
   section.appendChild(select);
+  return section;
+}
+
+function buildResetSection() {
+  const section = makeEl('div', [
+    'display:flex',
+    'justify-content:flex-end',
+    'padding:12px 0 2px',
+    'border-top:1px solid rgba(255,255,255,0.1)',
+    'margin-top:8px',
+  ].join(';'));
+
+  const btn = makeEl('button', [
+    'background:rgba(255,255,255,0.07)',
+    'border:1px solid rgba(255,255,255,0.2)',
+    'border-radius:4px',
+    'color:#ccc',
+    'font-size:13px',
+    'padding:5px 14px',
+    'cursor:pointer',
+  ].join(';'));
+  btn.textContent = 'Reset to Default';
+
+  btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(255,255,255,0.13)'; btn.style.color = '#fff'; });
+  btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.07)'; btn.style.color = '#ccc'; });
+
+  btn.addEventListener('click', async () => {
+    const { mappings, mode } = await window.NCCMappings.resetToDefaults();
+    overlayMappings = mappings;
+
+    const newGrid = buildGrid(overlayMappings);
+    overlayGrid.replaceWith(newGrid);
+    overlayGrid = newGrid;
+
+    if (overlayModeSelect) overlayModeSelect.value = mode;
+
+    await refreshConfig();
+  });
+
+  section.appendChild(btn);
   return section;
 }
 
@@ -466,7 +516,7 @@ async function showOverlay() {
       'color:#fff',
       'border-radius:8px',
       'padding:28px 32px 24px',
-      'min-width:400px',
+      'min-width:580px',
       'max-height:90vh',
       'overflow-y:auto',
       'box-shadow:0 8px 40px rgba(0,0,0,0.85)',
@@ -502,6 +552,7 @@ async function showOverlay() {
     panel.appendChild(closeBtn);
     panel.appendChild(overlayGrid);
     panel.appendChild(buildModeSection(mode ?? 'arrows'));
+    panel.appendChild(buildResetSection());
 
     overlay = panel;
     document.body.appendChild(overlay);
@@ -515,8 +566,9 @@ function hideOverlay() {
   listeningForKey  = null;
   onButtonCaptured = null;
   overlay.remove();
-  overlay      = null;
-  overlayGrid  = null;
+  overlay           = null;
+  overlayGrid       = null;
+  overlayModeSelect = null;
   refreshConfig();
 }
 

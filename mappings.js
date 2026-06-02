@@ -64,6 +64,18 @@
     return mappings;
   }
 
+  // --- Reset to defaults ---
+
+  async function resetToDefaults() {
+    const mappings = { ...DEFAULT_MAPPINGS };
+    const mode = DEFAULT_JOYSTICK_MODE;
+    await new Promise((resolve) => chrome.storage.local.set({
+      [STORAGE_KEY_MAPPINGS]: mappings,
+      [STORAGE_KEY_JOYSTICK]: mode,
+    }, resolve));
+    return { mappings, mode };
+  }
+
   // --- Joystick mode ---
 
   function loadJoystickMode() {
@@ -114,5 +126,6 @@
     clearButton,
     loadJoystickMode,
     saveJoystickMode,
+    resetToDefaults,
   };
 })();
