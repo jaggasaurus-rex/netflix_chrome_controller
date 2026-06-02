@@ -618,6 +618,7 @@ if (IS_TOP_FRAME) {
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === 'ping') {
       sendResponse({ status: 'ready' });
+      return false;
     } else if (msg.type === 'toggleOverlay') {
       toggleOverlay();
     }
