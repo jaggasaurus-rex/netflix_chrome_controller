@@ -4,6 +4,10 @@
   "version": "1.0",
   "description": "Maps gamepad input to keyboard events for Netflix Games",
   "permissions": ["activeTab"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {},
   "content_scripts": [
     {
       "matches": ["*://*.netflix.com/*"],

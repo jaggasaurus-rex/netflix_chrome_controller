@@ -135,3 +135,82 @@ window.addEventListener('gamepaddisconnected', (e) => {
 if ([...navigator.getGamepads()].some(Boolean)) {
   startPolling();
 }
+
+// ---------------------------------------------------------------------------
+// Overlay
+// ---------------------------------------------------------------------------
+
+let overlay = null;
+
+function createOverlay() {
+  const panel = document.createElement('div');
+  panel.id = 'ncc-overlay';
+  panel.style.cssText = [
+    'position:fixed',
+    'top:50%',
+    'left:50%',
+    'transform:translate(-50%,-50%)',
+    'z-index:2147483647',
+    'background:#141414',
+    'color:#fff',
+    'border-radius:8px',
+    'padding:28px 32px 24px',
+    'min-width:320px',
+    'box-shadow:0 8px 40px rgba(0,0,0,0.85)',
+    'font-family:"Netflix Sans","Helvetica Neue",Helvetica,Arial,sans-serif',
+  ].join(';');
+
+  const title = document.createElement('h2');
+  title.textContent = 'Controller Settings';
+  title.style.cssText = 'margin:0;font-size:20px;font-weight:700;letter-spacing:0.01em';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.style.cssText = [
+    'position:absolute',
+    'top:10px',
+    'right:14px',
+    'background:none',
+    'border:none',
+    'color:#fff',
+    'font-size:22px',
+    'line-height:1',
+    'cursor:pointer',
+    'padding:4px 6px',
+    'opacity:0.7',
+  ].join(';');
+  closeBtn.addEventListener('mouseover', () => { closeBtn.style.opacity = '1'; });
+  closeBtn.addEventListener('mouseout',  () => { closeBtn.style.opacity = '0.7'; });
+  closeBtn.addEventListener('click', hideOverlay);
+
+  panel.appendChild(title);
+  panel.appendChild(closeBtn);
+  return panel;
+}
+
+function showOverlay() {
+  if (overlay) return;
+  overlay = createOverlay();
+  document.body.appendChild(overlay);
+}
+
+function hideOverlay() {
+  if (!overlay) return;
+  overlay.remove();
+  overlay = null;
+}
+
+function toggleOverlay() {
+  overlay ? hideOverlay() : showOverlay();
+}
+
+// Backtick keyboard toggle
+document.addEventListener('keydown', (e) => {
+  if (e.key === '`') toggleOverlay();
+});
+
+// Icon-click toggle (message from background service worker)
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'toggleOverlay') toggleOverlay();
+});
