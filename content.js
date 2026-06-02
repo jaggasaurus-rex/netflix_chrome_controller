@@ -493,6 +493,25 @@ function buildResetSection() {
   return section;
 }
 
+function buildFooter() {
+  const footer = makeEl('div', 'margin-top:14px;text-align:center');
+
+  const link = makeEl('a', [
+    'color:rgba(255,255,255,0.28)',
+    'font-size:11px',
+    'text-decoration:none',
+  ].join(';'));
+  link.textContent = 'Buy me a coffee ☕';
+  link.href = 'https://buymeacoffee.com/localization';
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.addEventListener('mouseenter', () => { link.style.color = 'rgba(255,255,255,0.55)'; });
+  link.addEventListener('mouseleave', () => { link.style.color = 'rgba(255,255,255,0.28)'; });
+
+  footer.appendChild(link);
+  return footer;
+}
+
 // --- Show / hide / toggle ---
 
 async function showOverlay() {
@@ -553,6 +572,7 @@ async function showOverlay() {
     panel.appendChild(overlayGrid);
     panel.appendChild(buildModeSection(mode ?? 'arrows'));
     panel.appendChild(buildResetSection());
+    panel.appendChild(buildFooter());
 
     overlay = panel;
     document.body.appendChild(overlay);
