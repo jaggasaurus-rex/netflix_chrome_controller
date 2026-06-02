@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Netflix Controller Map",
+  "version": "1.0",
+  "description": "Maps gamepad input to keyboard events for Netflix Games",
+  "permissions": ["activeTab"],
+  "content_scripts": [
+    {
+      "matches": ["*://*.netflix.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
