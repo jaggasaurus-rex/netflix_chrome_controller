@@ -576,12 +576,16 @@ function toggleOverlay() {
   overlay ? hideOverlay() : showOverlay();
 }
 
-// Backtick keyboard toggle
+// Backtick keyboard toggle — only active while the page is in fullscreen
 document.addEventListener('keydown', (e) => {
-  if (e.key === '`') toggleOverlay();
+  if (e.key === '`' && document.fullscreenElement !== null) toggleOverlay();
 });
 
-// Icon-click toggle (message from background service worker)
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'toggleOverlay') toggleOverlay();
+// Messages from background service worker
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'ping') {
+    sendResponse({ status: 'ready' });
+  } else if (msg.type === 'toggleOverlay') {
+    toggleOverlay();
+  }
 });
