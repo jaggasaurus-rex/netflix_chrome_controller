@@ -31,9 +31,11 @@ context.md       — This file
 
 Handles icon clicks with a ping-then-inject pattern:
 
-1. Send `{ type: 'ping' }` to the active tab and await a response
+1. Send `{ type: 'ping' }` to the active tab (top frame only — no `frameId`) and await a response
 2. **If ping succeeds** (content script already running): send `{ type: 'toggleOverlay' }`
 3. **If ping throws** (content script not yet injected): inject `mappings.js` first, then `content.js` (order matters — `content.js` depends on `window.NCCMappings`), then send `{ type: 'toggleOverlay' }`
+
+Both `executeScript` calls use **`allFrames: true`** so the scripts are injected into every frame of the tab, including cross-origin iframes. The ping and `toggleOverlay` messages still target the top frame only (Chrome's default when no `frameId` is specified).
 
 The `chrome.tabs.sendMessage` rejection is the injection-state signal — no extra bookkeeping needed.
 
@@ -77,6 +79,16 @@ resetToDefaults()      → Promise<{ mappings, mode }>
 ---
 
 ## content.js
+
+### Frame awareness
+
+`const IS_TOP_FRAME = window === window.top` is defined at the top of the script and used throughout to gate frame-specific behavior:
+
+- **Polling loop, `fireKey`, `fireMouseMove`**: run in **all frames**. Each frame's instance dispatches events on its own `document`, which is the correct target for whichever frame hosts the game.
+- **Overlay** (all DOM, state variables, show/hide/toggle functions, mode dropdown, reset button, footer): runs in the **top frame only**, wrapped in `if (IS_TOP_FRAME)`.
+- **`chrome.runtime.onMessage` listener** (`ping` + `toggleOverlay`): top frame only.
+- **Backtick keydown listener**: runs in **all frames**. In the top frame it calls `toggleOverlay()`; in child frames it posts `{ type: 'nccToggle' }` to `window.top`.
+- **`window.message` listener**: top frame only. Receives `nccToggle` from child frames and calls `toggleOverlay()`.
 
 ### Xbox controller button index reference (W3C standard gamepad mapping)
 ```
@@ -124,27 +136,27 @@ When the overlay is waiting for a button press (`listeningForKey !== null`):
 - The stick loop returns early.
 - `onButtonCaptured` calls `assignButton`, updates `overlayMappings`, rebuilds the grid DOM, and calls `refreshConfig()` to sync the polling loop.
 
-### Message listener
+### Message listener (top frame only)
 
 Handles two message types from `background.js`:
-- `ping` — responds synchronously with `{ status: 'ready' }` so the service worker can detect the script is already running
+- `ping` — calls `sendResponse({ status: 'ready' })` immediately, then explicitly `return false` to close the message channel synchronously
 - `toggleOverlay` — calls `toggleOverlay()`
 
-### Overlay
+### Overlay (top frame only)
 
 Toggled by:
-1. Backtick (`` ` ``) keydown — **only fires when `document.fullscreenElement !== null`** (i.e. Netflix is in fullscreen/player mode)
+1. Backtick (`` ` ``) keydown — **only fires when `document.fullscreenElement !== null`**; works from any frame (child frames relay via `postMessage`)
 2. Extension icon click → `background.js` ping/inject → `{ type: 'toggleOverlay' }` message
 
 `showOverlay()` is async: loads mappings + joystick mode from storage before building DOM (no empty-state flash). `overlayBuilding` flag prevents double-build on rapid double-click.
 
-**Grid:** two-column CSS grid (`grid-auto-flow: column`, 7 rows per column), distributing the 13 keys with the first 7 in the left column and the last 6 in the right. Each row shows the key label and a chip button displaying the assigned button index or "Unassigned". Clicking a chip enters listening mode for that key. Clicking a second chip cancels the first. Clicking the active chip cancels it.
+**Grid:** two-column CSS grid (`grid-auto-flow: column`, 7 rows per column), distributing the 13 keys with the first 7 in the left column and the last 6 in the right. Each row shows the key label and a chip button. The chip displays the assigned button index using friendly labels: D-pad indices 12–15 show `D-Up` / `D-Down` / `D-Left` / `D-Right`; all other indices show `Button N`; unassigned shows `Unassigned`. The `buttonLabel(index)` helper is used consistently in both initial render (`buildRow`) and listening-cancel restore (`resetChip`). Clicking a chip enters listening mode for that key. Clicking a second chip cancels the first. Clicking the active chip cancels it.
 
 **Joystick mode dropdown:** below the grid. Saves to storage immediately on change via `saveJoystickMode` + `refreshConfig`. The select element is stored in `overlayModeSelect` so the reset handler can update it without rebuilding the section.
 
 **Reset to Default button:** below the joystick dropdown. Calls `resetToDefaults()` (defined in mappings.js — default values are not hardcoded in content.js), then updates `overlayMappings`, rebuilds the grid, and sets `overlayModeSelect.value` from the return value.
 
-**Footer:** centered link — "Buy me a coffee ☕" → `https://buymeacoffee.com/localization`, opens in new tab, styled low-contrast (`rgba(255,255,255,0.28)`).
+**Footer:** centered link — "Buy me a coffee ☕" → `https://buymeacoffee.com/localization`, opens in new tab. Font size `12px`, color `rgba(255,180,50,0.7)` (warm amber at mid opacity) at rest; lifts to `rgba(255,180,50,1)` on hover.
 
 **On close:** cancels any in-progress listening, nulls `overlayModeSelect`, calls `refreshConfig()` to sync game input with any changes made in the session.
 
@@ -189,4 +201,4 @@ chrome.storage.local
 - Triggers (LT/RT, buttons 6–7) are unhandled
 - No visual feedback that a gamepad is/isn't connected
 - Right stick (axes 2–3) unused
-- All synthetic events are dispatched on `document`; if Netflix attaches listeners on a shadow DOM or iframe, they won't be reached
+- Synthetic events are dispatched on `document` in each frame; shadow DOM listeners inside a frame won't be reached
